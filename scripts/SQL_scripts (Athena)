@@ -1,0 +1,49 @@
+
+--creating_database
+
+create database if not exists food_analytics;
+
+--creating_table
+
+create external table if not exists food_analytics.daily_restaurant_metrics(
+restaurant_id string,
+name string,
+cuisine string,
+city string,
+orders_deliverd int,
+gmv double,
+avg_delivery_mins double,
+late_count int,
+late_rate double
+)
+partitioned by(dt string)
+stored as PARQUET
+location 's3://gold-layer-arav/daily_restaurant_metrics/';
+
+msck repair table food_analytics.daily_restaurant_metrics;
+
+select dt,name,city,gmv,late_rate from food_analytics.daily_restaurant_metrics order by dt desc limit 10;
+
+--GVM trend by city
+
+select dt,city,sum(gmv) as total_gmv,
+sum(orders_deliverd) as total_orders
+from food_analytics.daily_restaurant_metrics
+group by dt,city;
+
+--top 5 restaurants by gvm
+
+select restaurant_id,name,city from(
+select *,
+rank() over(partition by restaurant_id order by gmv desc) as rank from food_analytics.daily_restaurant_metrics)
+where rank<6
+
+--late delivery analysis by cuisine
+
+select 
+cuisine,
+sum(late_count) as total_late_orders,
+sum(orders_deliverd) as total_delivered,
+round(sum(late_count)*100/sum(orders_deliverd),2) as late_rate_pct
+from food_analytics.daily_restaurant_metrics
+group by cuisine
