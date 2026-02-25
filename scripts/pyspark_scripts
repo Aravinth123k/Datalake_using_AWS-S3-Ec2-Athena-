@@ -1,0 +1,66 @@
+--initiating_pyspark
+
+pyspark \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.641 \
+  --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+  --conf spark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.DefaultAWSCredentialsProviderChain \
+  --conf spark.hadoop.fs.s3a.endpoint=s3.us-east-1.amazonaws.com
+
+--creating_dataframe(check)
+
+df = spark.read \
+    .option("header", "true") \
+    .csv("s3a://bronze-layer-****/orders/dt=2025-08-20/orders.csv")
+
+--initializing_path
+
+bronze='s3a://bronze-layer-****'
+silver='s3a://silver-layer-****'
+gold='s3a://gold-layer-****'
+
+--read and creating restaurant and orders dataframe from bronze_layer
+
+restuarant=spark.read.option('header','true').csv(f"{bronze}/restaurants/*.csv")
+
+orders=spark.read.option('header','true').csv(f"{bronze}/orders/*/*.csv")
+
+--cleaning the dataframes
+
+orders=orders.withColumn('order_ts',to_timestamp(col('order_ts')))\
+.withColumn('order_ts',to_timestamp(col('order_ts')))\
+.withColumn('delivered_td',to_timestamp(col('delivered_td')))\
+.withColumn('order_value',col('order_value').cast('double'))\
+.withColumn('late_delivery',when(\
+(col('status')=='DELIVERED') & \
+((unix_timestamp('delivered_td')-unix_timestamp('order_ts'))>col('promised_mins')*60),lit(1)).\
+otherwise(lit(0)))\
+.withColumn('dt',col('order_ts').cast('date'))
+
+--writing orders and restaurant dataframe to silver_layer
+
+orders.write.mode('overwrite').partitionBy('dt').parquet(f"{silver}/orders")
+restuarant.write.mode('overwrite').parquet(f"{silver}/restuarant")
+
+--read and creating order_s, rest_s dataframes from silver_layer
+
+order_s=spark.read.parquet(f"{silver}/orders")                              
+rest_s=spark.read.parquet(f"{silver}/restuarant")
+
+--doing aggregations based on business logic
+
+order_enriched=order_s.alias('o').join(rest_s.alias('r'),order_s.restaurant_id==rest_s.restaurant_id,'left')
+
+daily_rest_metrics= order_enriched\
+.where(col('status')=='DELIVERED')\
+.groupBy('dt','o.restaurant_id','r.name','r.cuisine','o.city').\
+agg(\
+count(lit(1)).alias('orders_delivered'),\
+sum('order_value').alias('gmv'),\
+avg((unix_timestamp('delivered_td')-unix_timestamp('order_ts'))/60.0).alias('avg_delivery_mins'),\
+sum('late_delivery').alias('late_count')\
+)\
+.withColumn('late_rate',col('late_count')/col('orders_delivered'))
+
+--writing to the gold_layer
+
+daily_rest_metrics.write.mode('overwrite').partitionBy('dt').parquet(f"{gold}/daily_restaurant_metrics")
